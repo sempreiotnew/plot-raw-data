@@ -1,0 +1,5 @@
+pandas
+matplotlib
+pytz
+plotly
+dash
