@@ -4,41 +4,67 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
+import serial
+import threading
+import time
 
-# Path to your CSV file
-FILENAME = "/Users/tallesrocha/Desktop/sempreiot-new/code/bme688-api-sensor/hp-test.csv"
+# ============ SERIAL CONFIG ============
+SERIAL_PORT = "/dev/tty.usbserial-0001"  # <-- change to your Arduino port
+BAUD_RATE = 115200
 
-# Helper function to load + process CSV
-def load_data():
-    # find first real header line
-    with open(FILENAME, "r") as f:
-        for i, line in enumerate(f):
+# open serial connection
+ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+
+# global dataframe
+df_global = pd.DataFrame()
+lock = threading.Lock()
+
+# ============ BACKGROUND THREAD TO READ SERIAL ============
+def serial_reader():
+    global df_global
+    header = []
+    while True:
+        try:
+            line = ser.readline().decode("utf-8").strip()
+            if not line:
+                continue
+
+            # first header detection
             if line.startswith("id,"):
-                header_line = i
-                break
+                header = line.split(",")
+                continue
 
-    # read CSV starting at header, skip malformed rows automatically
-    df = pd.read_csv(
-        FILENAME,
-        skiprows=header_line,
-        on_bad_lines="skip"
-    )
+            if header and "," in line:
+                parts = line.split(",")
+                if len(parts) == len(header):
+                    row = dict(zip(header, parts))
+                    try:
+                        # convert numeric fields safely
+                        row = {k: pd.to_numeric(v, errors="ignore") for k, v in row.items()}
+                        row["sensor_key"] = str(row["id"]) + "_S" + str(row["index"])
+                        with lock:
+                            df_global = pd.concat([df_global, pd.DataFrame([row])], ignore_index=True)
+                    except Exception as e:
+                        print("Parse error:", e)
 
-    if "status" in df.columns:
-        df = df[df["status"].astype(str) != "a0"]
-    # Create unique sensor key (ID + INDEX for classification)
-    df["sensor_key"] = df["id"].astype(str) + "_S" + df["index"].astype(str)
-    return df
+        except Exception as e:
+            print("Serial error:", e)
+            time.sleep(1)
 
-# Function to generate Gas Resistance ticks with both numeric + scientific notation
+# start background reader
+threading.Thread(target=serial_reader, daemon=True).start()
+
+# ============ PLOTTING HELPERS ============
 def gas_ticks(ymin, ymax, n=6):
     ticks = np.linspace(ymin, ymax, n)
     ticktext = [f"{int(t):,} Ω\n({t:.0e})" for t in ticks]
     return ticks, ticktext
 
-# Build figure given a dataframe
 def make_figure(df, selected_sensor):
     sensors = df["sensor_key"].unique()
+    if selected_sensor not in sensors:
+        return go.Figure(), sensors
+
     d = df[df["sensor_key"] == selected_sensor].sort_values("millis")
 
     # Global min/max for Gas Resistance for axis scale
@@ -131,38 +157,50 @@ def make_figure(df, selected_sensor):
 
     return fig, sensors
 
-# ------------------- DASH APP -------------------
+# ============ DASH APP ============
 app = Dash(__name__)
 
-df_init = load_data()
-sensors_init = df_init["sensor_key"].unique()  # define sensors first
-fig_init, _ = make_figure(df_init, sensors_init[0])  # build figure with first sensor
+# initial figure (empty until serial provides data)
+df_init = pd.DataFrame(columns=["id","index","millis","temperature","pressure","humidity","gas_resistance","status","sensor_key"])
+fig_init = go.Figure()
 
 app.layout = html.Div([
     html.H2("BME688 Live Dashboard", style={"color":"white", "textAlign":"center"}),
     dcc.Dropdown(
         id="sensor-dropdown",
-        options=[{"label": s, "value": s} for s in sensors_init],
-        value=sensors_init[0],
+        options=[],  # will populate dynamically
+        value=None,
         style={"width":"400px", "margin":"auto"}
     ),
     dcc.Graph(id="live-graph", figure=fig_init),
     dcc.Interval(
         id="interval-refresh",
-        interval=1*60*1000,  # 5 minutes
+        interval=2000,  # every 2 seconds
         n_intervals=0
     )
 ], style={"backgroundColor":"#111", "padding":"20px"})
 
 @app.callback(
-    Output("live-graph", "figure"),
+    [Output("live-graph", "figure"),
+     Output("sensor-dropdown", "options"),
+     Output("sensor-dropdown", "value")],
     Input("interval-refresh", "n_intervals"),
     Input("sensor-dropdown", "value")
 )
 def update_graph(n, selected_sensor):
-    df = load_data()
-    fig, _ = make_figure(df, selected_sensor)
-    return fig
+    global df_global
+    with lock:
+        df = df_global.copy()
+
+    if df.empty:
+        return go.Figure(), [], None
+
+    sensors = df["sensor_key"].unique()
+    if not selected_sensor or selected_sensor not in sensors:
+        selected_sensor = sensors[0]
+
+    fig, sensors = make_figure(df, selected_sensor)
+    return fig, [{"label": s, "value": s} for s in sensors], selected_sensor
 
 if __name__ == "__main__":
     app.run(debug=True)
