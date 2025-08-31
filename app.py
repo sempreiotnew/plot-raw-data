@@ -16,6 +16,9 @@ BAUD_RATE = 115200
 # Open serial port globally (non-blocking)
 ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
 
+# Store all serial lines globally
+all_lines = []
+
 # Handle Ctrl+C clean exit
 def signal_handler(sig, frame):
     print("\nStopping server...")
@@ -26,30 +29,34 @@ signal.signal(signal.SIGINT, signal_handler)
 
 # Helper function to load + process Serial Data
 def load_data():
-    lines = []
-    header_line = None
-
-    # Non-blocking read: only read available data in buffer
+    global all_lines
+    # Read all available lines
     while ser.in_waiting > 0:
         try:
             line = ser.readline().decode("utf-8").strip()
         except Exception:
             continue
-        if not line:
-            continue
+        if line:
+            print(line)
+            all_lines.append(line)
 
-        print(line)  # <-- PRINT RAW SERIAL DATA
-
-        if line.startswith("id,") and header_line is None:
-            header_line = line
-            lines.append(line)
-        elif header_line:
-            lines.append(line)
+    # Find first CSV header
+    header_line = None
+    for l in all_lines:
+        if l.startswith("id,"):  # only the real CSV header
+            header_line = l
+            break
 
     if not header_line:
-        return pd.DataFrame(columns=["id","index","millis","gas_resistance","status","temperature","pressure","humidity"])
+        # no CSV header yet, return empty DataFrame
+        return pd.DataFrame(columns=[
+            "id","index","millis","gas_index","mes_index",
+            "temperature","pressure","humidity","gas_resistance","status"
+        ])
 
-    csv_data = "\n".join(lines)
+    # Only keep lines from the header onward
+    start_idx = all_lines.index(header_line)
+    csv_data = "\n".join(all_lines[start_idx:])
     df = pd.read_csv(StringIO(csv_data), on_bad_lines="skip")
 
     if "status" in df.columns:
@@ -60,13 +67,13 @@ def load_data():
 
     return df
 
-# Gas ticks function (unchanged)
+# Gas ticks function
 def gas_ticks(ymin, ymax, n=6):
     ticks = np.linspace(ymin, ymax, n)
     ticktext = [f"{int(t):,} Ω\n({t:.0e})" for t in ticks]
     return ticks, ticktext
 
-# Figure building (unchanged)
+# Figure building
 def make_figure(df, selected_sensor):
     sensors = df["sensor_key"].unique() if not df.empty else ["NoData"]
     d = df[df["sensor_key"] == selected_sensor].sort_values("millis") if not df.empty else pd.DataFrame()
