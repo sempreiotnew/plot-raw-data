@@ -62,7 +62,6 @@ def serial_worker(port, baud, timeout):
                     csv_line = ",".join(str(row[col]) for col in serial_header)
                     print(f"{csv_line}")
 
-
         except Exception as e:
             print("[serial_worker] exception:", e)
             time.sleep(1)
@@ -75,7 +74,7 @@ def load_data():
             return pd.DataFrame()
         rows_copy = list(serial_buffer)
     df = pd.DataFrame(rows_copy)
-    numeric_cols = ["millis","gas_resistance","temperature","pressure","humidity","index"]
+    numeric_cols = ["millis","gas_resistance","temperature","pressure","humidity","index","gas_index"]
     for c in numeric_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -85,24 +84,15 @@ def load_data():
         df["sensor_key"] = df["id"].astype(str) + "_S" + df["index"].astype(str)
     return df
 
-# ---------------- GAS TICKS ----------------
-def gas_ticks(ymin, ymax, n=6):
-    ticks = np.linspace(ymin, ymax, n)
-    ticktext = [f"{int(t):,} Ω\n({t:.0e})" for t in ticks]
-    return ticks, ticktext
-
 # ---------------- MAKE FIGURE ----------------
 def make_figure(df, selected_sensor):
-    needed_cols = ["millis","gas_resistance","temperature","pressure","humidity","id","index","status","sensor_key"]
+    needed_cols = ["millis","gas_resistance","temperature","pressure","humidity","id","index","status","sensor_key","gas_index"]
     for c in needed_cols:
         if c not in df.columns:
-            df[c] = pd.Series(dtype=float if c in ["millis","gas_resistance","temperature","pressure","humidity","index"] else object)
+            df[c] = pd.Series(dtype=float if c in ["millis","gas_resistance","temperature","pressure","humidity","index","gas_index"] else object)
 
     sensors = df["sensor_key"].unique() if "sensor_key" in df.columns else []
     d = df[df["sensor_key"] == selected_sensor].sort_values("millis") if selected_sensor in sensors else pd.DataFrame()
-    global_min = df["gas_resistance"].min() if "gas_resistance" in df.columns and not df["gas_resistance"].empty else 0
-    global_max = df["gas_resistance"].max() if "gas_resistance" in df.columns and not df["gas_resistance"].empty else 1
-    global_ticks, global_ticktext = gas_ticks(global_min, global_max)
 
     fig = make_subplots(
         rows=4, cols=2,
@@ -114,9 +104,46 @@ def make_figure(df, selected_sensor):
         shared_xaxes=True, vertical_spacing=0.05
     )
 
-    # Plots
-    fig.add_trace(go.Scatter(x=d["millis"], y=d["gas_resistance"], mode="lines+markers",
-                             name="Gas Resistance", hovertemplate="Gas: %{y:,.0f} Ω (%{y:.0e})<extra></extra>"), row=1, col=1)
+    # --- Gas Resistance Curves ---
+    if not d.empty:
+        color_map = {
+            100: "orange",   # Forced mode calibration
+            99: "cyan",      # Forced mode measurement
+        }
+        parallel_colors = [
+            "red","green","blue","purple","magenta",
+            "yellow","lime","teal","pink","brown"
+        ]
+        for gas_idx in sorted(d["gas_index"].unique()):
+            if pd.isna(gas_idx):
+                continue
+            try:
+                gi = int(gas_idx)
+            except ValueError:
+                continue
+
+            sub = d[d["gas_index"].astype(int) == gi]
+            if sub.empty:
+                continue
+
+            if gi in (99, 100):
+                fig.add_trace(go.Scatter(
+                    x=sub["millis"], y=sub["gas_resistance"],
+                    mode="lines+markers",
+                    name=f"Forced {gi}",
+                    line=dict(color=color_map.get(gi, "gray")),
+                    hovertemplate="Gas: %{y:,.0f} Ω (%{y:.0e})<extra></extra>"
+                ), row=1, col=1)
+            else:
+                fig.add_trace(go.Scatter(
+                    x=sub["millis"], y=sub["gas_resistance"],
+                    mode="lines+markers",
+                    name=f"Step {gi}",
+                    line=dict(color=parallel_colors[gi % len(parallel_colors)]),
+                    hovertemplate="Gas: %{y:,.0f} Ω (%{y:.0e})<extra></extra>"
+                ), row=1, col=1)
+
+    # --- Temperature, Pressure, Humidity ---
     fig.add_trace(go.Scatter(x=d["millis"], y=d["temperature"], mode="lines+markers",
                              name="Temperature (°C)", hovertemplate="%{y:.2f} °C<extra></extra>"), row=2, col=1)
     fig.add_trace(go.Scatter(x=d["millis"], y=d["pressure"], mode="lines+markers",
@@ -124,8 +151,8 @@ def make_figure(df, selected_sensor):
     fig.add_trace(go.Scatter(x=d["millis"], y=d["humidity"], mode="lines+markers",
                              name="Humidity (%)", hovertemplate="%{y:.2f}%<extra></extra>"), row=4, col=1)
 
-    # Tables
-    table_cols = ["id","index","gas_resistance","status"]
+    # --- Tables ---
+    table_cols = ["id","index","gas_resistance","status","gas_index"] if "gas_index" in d.columns else ["id","index","gas_resistance","status"]
     present_cols = [c for c in table_cols if c in d.columns]
     fig.add_trace(go.Table(
         header=dict(values=[f"<b>{c}</b>" for c in present_cols], fill_color="#111", font=dict(color="white")),
@@ -143,7 +170,7 @@ def make_figure(df, selected_sensor):
 
     # Layout
     fig.update_layout(template="plotly_dark", title=f"BME688 Dashboard - {selected_sensor}", hovermode="x unified", height=1150, width=1500)
-    fig.update_yaxes(title_text="Gas Resistance (Ω)", row=1, col=1, tickvals=global_ticks, ticktext=global_ticktext)
+    fig.update_yaxes(title_text="Gas Resistance (Ω, log scale)", row=1, col=1, type="log")
     fig.update_yaxes(title_text="Temperature (°C)", row=2, col=1)
     fig.update_yaxes(title_text="Pressure (Pa)", row=3, col=1)
     fig.update_yaxes(title_text="Humidity (%)", row=4, col=1)
