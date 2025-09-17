@@ -36,7 +36,8 @@ def serial_worker(port, baud, timeout):
                 except Exception:
                     line = raw.decode("latin-1", errors="replace").strip()
                 if not line or line.startswith("-"):
-                    continue
+                    # continue
+                    print(line)
 
                 # Detect header
                 if line.lower().startswith("id,"):
@@ -73,6 +74,7 @@ def load_data():
         if len(serial_buffer) == 0:
             return pd.DataFrame()
         rows_copy = list(serial_buffer)
+
     df = pd.DataFrame(rows_copy)
     numeric_cols = ["millis","gas_resistance","temperature","pressure","humidity","index","gas_index"]
     for c in numeric_cols:
@@ -154,9 +156,12 @@ def make_figure(df, selected_sensor):
     # --- Tables ---
     table_cols = ["id","index","gas_resistance","status","gas_index"] if "gas_index" in d.columns else ["id","index","gas_resistance","status"]
     present_cols = [c for c in table_cols if c in d.columns]
+    # Sort descending by millis
+    d_sorted = d.sort_values("millis", ascending=False)
+
     fig.add_trace(go.Table(
         header=dict(values=[f"<b>{c}</b>" for c in present_cols], fill_color="#111", font=dict(color="white")),
-        cells=dict(values=[d[c] for c in present_cols], fill_color="#1f2937", font=dict(color="white"))
+        cells=dict(values=[d_sorted[c] for c in present_cols], fill_color="#1f2937", font=dict(color="white"))
     ), row=1, col=2)
 
     min_v = d["gas_resistance"].min() if not d.empty else 0
@@ -169,7 +174,23 @@ def make_figure(df, selected_sensor):
     ), row=2, col=2)
 
     # Layout
-    fig.update_layout(template="plotly_dark", title=f"BME688 Dashboard - {selected_sensor}", hovermode="x unified", height=1150, width=1500)
+    # fig.update_layout(template="plotly_dark", title=f"BME688 Dashboard - {selected_sensor}", hovermode="x unified", height=1150, width=1500, dragmode="pan",)
+    fig.update_layout(
+        template="plotly_dark",
+        title=f"BME688 Dashboard - {selected_sensor}",
+        hovermode="x unified",
+        height=1150,
+        width=1500,
+        dragmode="pan",        # pan with mouse drag
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            fixedrange=False   # <-- keep zoom enabled
+        ),
+        yaxis=dict(
+            fixedrange=False   # <-- keep zoom enabled
+        )
+    )
+
     fig.update_yaxes(title_text="Gas Resistance (Ω, log scale)", row=1, col=1, type="log")
     fig.update_yaxes(title_text="Temperature (°C)", row=2, col=1)
     fig.update_yaxes(title_text="Pressure (Pa)", row=3, col=1)
@@ -204,15 +225,47 @@ def update_sensors(n, current_value):
     options = [{"label": s, "value": s} for s in sensors]
     return options, value
 
+
+# @app.callback(
+#     Output("live-graph", "figure"),
+#     [Input("interval-refresh", "n_intervals"), Input("sensor-dropdown", "value")]
+# )
+# def update_graph(n, selected_sensor):
+#     if selected_sensor is None:
+#         return go.Figure()
+#     df = load_data()
+#     fig, _ = make_figure(df, selected_sensor)
+#     return fig
+
 @app.callback(
     Output("live-graph", "figure"),
-    [Input("interval-refresh", "n_intervals"), Input("sensor-dropdown", "value")]
+    [
+        Input("interval-refresh", "n_intervals"),
+        Input("sensor-dropdown", "value"),
+        Input("live-graph", "relayoutData")  # <-- capture zoom/pan
+    ]
 )
-def update_graph(n, selected_sensor):
+def update_graph(n, selected_sensor, relayout_data):
     if selected_sensor is None:
         return go.Figure()
     df = load_data()
     fig, _ = make_figure(df, selected_sensor)
+
+    # --- Preserve zoom/pan ---
+    if relayout_data:
+        # Check if x-axis range exists (zoom applied)
+        if "xaxis.range[0]" in relayout_data and "xaxis.range[1]" in relayout_data:
+            fig.update_xaxes(range=[
+                relayout_data["xaxis.range[0]"], 
+                relayout_data["xaxis.range[1]"]
+            ])
+        # Same for y-axis
+        if "yaxis.range[0]" in relayout_data and "yaxis.range[1]" in relayout_data:
+            fig.update_yaxes(range=[
+                relayout_data["yaxis.range[0]"], 
+                relayout_data["yaxis.range[1]"]
+            ])
+
     return fig
 
 # ------------------- MAIN -------------------
